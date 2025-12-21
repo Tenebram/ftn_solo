@@ -1,3 +1,4 @@
+
 import numpy as np
 from rclpy.node import Node
 
@@ -8,7 +9,6 @@ def float_or_list(value, num_joints):
 
 class FeedbackLinearization():
     def __init__(self, robot, yaml_config) -> None:
-        self.node = Node("FL")
         self.robot = robot
         num_joints = robot.nv - 6
         self.Kp = float_or_list(yaml_config["Kp"], num_joints)

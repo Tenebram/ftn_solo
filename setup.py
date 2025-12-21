@@ -32,11 +32,8 @@ setup(
         'console_scripts': [
             'simulation_node = ftn_solo.visualize:simulate',
             'connector_node = ftn_solo.connector:main',
-<<<<<<< HEAD
-            'identify_friction = ftn_solo.identify_friction:main'
-=======
-            'joystick_node = ftn_solo.joystick:main',
->>>>>>> 387538e (squashed)
+            'identify_friction = ftn_solo.identify_friction:main',
+            'joystick_node = ftn_solo.joystick:main'
         ],
     },
 )

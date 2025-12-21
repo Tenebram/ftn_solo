@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+
+<mujoco>
+    <worldbody>
+        <light pos="0 0 2"/>
+        <light pos="1 0 1.85"/>
+        <geom type="plane" size="0.6 1.0 0.1" material="grid"/>
+    </worldbody>
+</mujoco>

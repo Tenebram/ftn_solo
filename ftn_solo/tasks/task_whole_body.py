@@ -1,7 +1,7 @@
 from transitions import Machine
 import numpy as np
 from scipy.interpolate import CubicSpline
-from .task_base import TaskBase
+from .task_base import TaskWithInitPose, TaskBase
 from ftn_solo.controllers import FeedbackLinearization, PDWithFrictionCompensation
 from robot_properties_solo import Solo12Robot
 import pinocchio as pin
@@ -18,6 +18,7 @@ from sensor_msgs.msg import Joy
 from scipy.linalg import expm
 import math
 
+
 class Estimator:
     def __init__(self, robot) -> None:
         self.robot = robot
@@ -28,8 +29,8 @@ class Estimator:
 
     def init(self, q, qv, sensors):
         self.estimated_q[2] = 0.0
-        self.estimated_q[3:6] = sensors["attitude"][1:4]
-        self.estimated_q[6] = sensors["attitude"][0]
+        self.estimated_q[3:6] = sensors.imu_data.attitude[1:4]
+        self.estimated_q[6] = sensors.imu_data.attitude[0]
         self.estimated_q[7:] = q
         self.estimated_qv[6:] = qv
         self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
@@ -45,8 +46,8 @@ class Estimator:
         self.num_contacts = 4
 
     def estimate(self, t, q, qv, sensors):
-        self.estimated_q[3:6] = sensors["attitude"][1:4]
-        self.estimated_q[6] = sensors["attitude"][0]
+        self.estimated_q[3:6] = sensors.imu_data.attitude[1:4]
+        self.estimated_q[6] = sensors.imu_data.attitude[0]
         self.estimated_q[7:] = q
         self.estimated_qv[6:] = qv
         err = 1
@@ -81,12 +82,12 @@ class Estimator:
                                                           self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :]
             i = i+1
         b = np.zeros(self.num_contacts*3+3)
-        b[0:3] = alpha*sensors["imu"][0]
+        b[0:3] = alpha*sensors.imu_data.angular_velocity[0]
         b[3:] = -np.dot(J[3:, 6:], qv)
         self.estimated_qv[0:6] = np.dot(    np.linalg.pinv(J[:, :6]), b)
 
 
-class TaskMoveBase(TaskBase):
+class TaskMoveWholeBody(TaskBase):
     states = ["start", "move_base", "move_up", "idle"]
 
     def __init__(self,  num_joints, robot_type,  config_yaml) -> None:
@@ -96,7 +97,7 @@ class TaskMoveBase(TaskBase):
             self.robot = Solo12Robot()
         else:
             raise ("Only solo12 supported")
-        self.joint_controller = PDWithFrictionCompensation(
+        self.joint_controller = FeedbackLinearization(
             self.robot.pin_robot, self.config["joint_controller"])
         self.parse_poses(self.config["poses"])
         self.on_start = SplineData(
@@ -106,7 +107,7 @@ class TaskMoveBase(TaskBase):
             self.loop.append(SplineData(point, self.num_joints, self.poses))
         self.loop_phase = 0
         self.machine = Machine(
-            model=self, states=TaskMoveBase.states, initial="start")
+            model=self, states=TaskMoveWholeBody.states, initial="start")
         
         self.transition_maker()
         
@@ -195,7 +196,7 @@ class TaskMoveBase(TaskBase):
         self.ref_velocity = self.trajectory(t, 1)
         self.ref_acceleration = self.trajectory(t, 2)
         self.control = self.joint_controller.compute_control(
-            self.ref_position, self.ref_velocity, None, q, qv)
+            self.ref_position, self.ref_velocity, self.ref_acceleration, q, qv)
         return t >= self.transition_end
 
     def moving_base(self, t, q, qv):

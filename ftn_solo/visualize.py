@@ -88,4 +88,3 @@ with mujoco.viewer.launch_passive(m, d, show_right_ui=False, key_callback=key_ca
     
 # if __name__ == '__main__':
 #     simulate()    
-

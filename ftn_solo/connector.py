@@ -17,6 +17,10 @@ from ftn_solo.tasks import *
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 from ftn_solo.utils.conversions import ToVector
+from ftn_solo_control import SensorData
+import xacro
+import os
+from ament_index_python.packages import get_package_share_directory
 
 import signal
 from contextlib import contextmanager
@@ -237,16 +241,33 @@ class PybulletConnector(SimulationConnector):
 class MujocoConnector(SimulationConnector):
     def __init__(self, robot_version, logger, use_gui=True, start_paused=False, fixed=False, pos=[0, 0, 0.4], rpy=[0.0, 0.0, 0.0], environment="", environments_package="") -> None:
         super().__init__(robot_version, logger)
-        self.model = mujoco.MjModel.from_xml_path(self.resources.mjcf_path)
-        self.model.opt.timestep = 1e-3
+        environment_path = ""
+        if not environment == "":
+            if not environments_package == "":
+                environment_path = os.path.join(
+                    get_package_share_directory(
+                        environments_package), environment
+                )
+            else:
+                environment_path = environment
+        xml_string = xacro.process(
+            self.resources.mjcf_path + ".xacro",
+            mappings={
+                "environment": environment_path,
+                "resources_dir": self.resources.resources_dir,
+            },
+        )
+        self.model = mujoco.MjModel.from_xml_string(xml_string)
+        self.model.opt.timestep = 0.0010001
+
         if fixed:
             self.model.equality("fixed").active0 = True
-
         self.data = mujoco.MjData(self.model)
         self.data.qpos[0:3] = pos
         mujoco.mju_euler2Quat(self.data.qpos[3:7], rpy, "XYZ")
         self.data.qpos[7:] = 0
-
+        if self.initial_pose is not None:
+            self.data.qpos[7:] = self.initial_pose
         self.data.qvel[:] = 0
         self.joint_names = [self.model.joint(
             i + 1).name for i in range(self.model.nu)]
@@ -348,36 +369,51 @@ class ConnectorNode(Node):
             except Exception as exc:
                 raise exc
 
-        self.fixed = False
         if hardware.lower() != "robot":
             use_gui = self.get_parameter(
-                'use_gui').get_parameter_value().bool_value
-            start_paused = self.get_parameter(
-                'start_paused').get_parameter_value().bool_value
+                "use_gui").get_parameter_value().bool_value
             self.fixed = self.get_parameter(
-                'fixed').get_parameter_value().bool_value
+                "fixed").get_parameter_value().bool_value
             pos = self.get_parameter(
                 "pos").get_parameter_value().double_array_value
             rpy = self.get_parameter(
-                'rpy').get_parameter_value().double_array_value
-            if hardware.lower() == 'mujoco':
-                self.connector = MujocoConnector(robot_version, self.get_logger(),
-                                                 use_gui=use_gui, start_paused=start_paused, fixed=self.fixed, pos=pos, rpy=rpy)
-            elif hardware.lower() == 'pybullet':
+                "rpy").get_parameter_value().double_array_value
+            # Can go lower if we set niceness
+            self.allowed_time = 1.0
+            if hardware.lower() == "mujoco":
+                self.connector = MujocoConnector(
+                    robot_version, self.get_logger(), pos=pos, rpy=rpy, **self.config["mujoco"])
+            elif hardware.lower() == "pybullet":
                 self.connector = PybulletConnector(
                     robot_version, self.get_logger(), fixed=self.fixed, pos=pos, rpy=rpy)
         else:
-            self.connector = RobotConnector(robot_version,  self.get_logger())
+            niceness = os.nice(0)
+            niceness = os.nice(-20 - niceness)
+            self.get_logger().info("Setting niceness to {}".format(niceness))
+            self.allowed_time = 1.0
+            self.connector = RobotConnector(robot_version, self.get_logger())
 
-        if task == 'joint_spline':
-            self.task = TaskJointSpline(self.connector.num_joints(),
-                                        robot_version, self.get_parameter('config').get_parameter_value().string_value)
-        elif task == 'move_base':
-            self.task = TaskMoveBase(self.connector.num_joints(),
-                                     robot_version, self.get_parameter('config').get_parameter_value().string_value)
-        elif task == 'draw_shapes':
-            self.task = TaskDrawShapes(self.connector.num_joints(),
-                                       robot_version, self.get_parameter('config').get_parameter_value().string_value)
+        self.get_logger().info("Allowed time to run is {}".format(self.allowed_time))
+        if task == "joint_spline":
+            self.task = TaskJointSpline(
+                self.connector.num_joints(), robot_version, self.config
+            )
+        elif task == "move_base":
+            self.task = TaskMoveBase(
+                self.connector.num_joints(), robot_version, self.config
+            )
+        elif task == "draw_shapes":
+            self.task = TaskDrawShapes(
+                self.connector.num_joints(), robot_version, self.config
+            )
+        elif task == "friction_identification":
+            self.task = TaskFrictionIdentification(
+                self.connector.num_joints(), robot_version, self.config
+            )
+        elif task == "move_whole_body":
+            self.task = TaskMoveWholeBody(
+                self.connector.num_joints(), robot_version, self.config
+            )
         else:
             self.get_logger().error("Unknown task selected!!! Switching to joint_spline task!")
             self.task = TaskJointSpline(
