@@ -18,74 +18,86 @@ from sensor_msgs.msg import Joy
 from scipy.linalg import expm
 import math
 import time
+from ftn_solo_control import (
+    FixedPointsEstimator,
+    FrictionConeMap,
+    SplineTrajectory,
+    get_touching_pose,
+    get_touching_placement,
+    EEFPositionMotion,
+    JointMotion,
+    WholeBodyController,
+    MotionsVector,
+    TrajectoryPlanner,
+)
 
-class Estimator:
-    def __init__(self, robot) -> None:
-        self.robot = robot
-        self.estimated_q = np.zeros(self.robot.pin_robot.nq)
-        self.estimated_qv = np.zeros(self.robot.pin_robot.nv)
-        self.contacts = dict()
-        self.node = Node("estimator")
+# class Estimator:
+#     def __init__(self, robot) -> None:
+#         self.robot = robot
+#         self.estimated_q = np.zeros(self.robot.pin_robot.nq)
+#         self.estimated_qv = np.zeros(self.robot.pin_robot.nv)
+#         self.contacts = dict()
+#         self.node = Node("estimator")
 
-    def init(self, q, qv, sensors):
-        self.estimated_q[2] = 0.0
-        self.estimated_q[3:6] = sensors.imu_data.attitude[1:4]
-        self.estimated_q[6] = sensors.imu_data.attitude[0]
-        self.estimated_q[7:] = q
-        self.estimated_qv[6:] = qv
-        self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
-        mean = np.zeros(3, dtype=np.float64)
-        for foot in (self.robot.fl_index, self.robot.fr_index, self.robot.hl_index, self.robot.hr_index):
-            self.contacts[foot] = deepcopy(
-                self.robot.pin_robot.data.oMf[foot].translation)
-            mean = mean + self.contacts[foot]
-        mean = mean / 4.0
-        self.estimated_q[2] = -mean[2]
-        for _, pos in self.contacts.items():
-            pos[2] = pos[2]-mean[2]
-        self.num_contacts = 4
+#     def init(self, q, qv, sensors):
+#         self.estimated_q[2] = 0.0
+#         self.estimated_q[3:6] = sensors.imu_data.attitude[1:4]
+#         self.estimated_q[6] = sensors.imu_data.attitude[0]
+#         self.estimated_q[7:] = q
+#         self.estimated_qv[6:] = qv
+#         self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
+#         mean = np.zeros(3, dtype=np.float64)
+#         for foot in (self.robot.fl_index, self.robot.fr_index, self.robot.hl_index, self.robot.hr_index):
+#             self.contacts[foot] = deepcopy(
+#                 self.robot.pin_robot.data.oMf[foot].translation)
+#             mean = mean + self.contacts[foot]
+#         mean = mean / 4.0
+#         self.estimated_q[2] = -mean[2]
+#         for _, pos in self.contacts.items():
+#             pos[2] = pos[2]-mean[2]
+#         self.num_contacts = 4
 
-    def estimate(self, t, q, qv, sensors):
-        self.estimated_q[3:6] = sensors.imu_data.attitude[1:4]
-        self.estimated_q[6] = sensors.imu_data.attitude[0]
-        self.estimated_q[7:] = q
-        self.estimated_qv[6:] = qv
-        err = 1
-        grad = 1
-        J = np.zeros((self.num_contacts*3, 6))
-        err = np.zeros(self.num_contacts*3)
-        step = np.zeros(self.robot.pin_robot.nv)
-        while grad > 1e-6:
-            self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
-            i = 0
-            for index, pos in self.contacts.items():
-                err[i*3: (i+1)*3] = pos - \
-                    self.robot.pin_robot.data.oMf[index].translation
-                J[i*3: (i+1)*3, :] = pin.getFrameJacobian(self.robot.pin_robot.model,
-                                                          self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :6]
-                i = i+1
-            if (np.linalg.norm(err) < 0.5e-4):
-                break
-            step[0:6] = np.dot(np.linalg.pinv(J), err)
-            grad = np.linalg.norm(step[0:6])
-            self.estimated_q = pin.integrate(
-                self.robot.pin_robot.model, self.estimated_q, 0.75*step)
+#     def estimate(self, t, q, qv, sensors):
+#         self.estimated_q[3:6] = sensors.imu_data.attitude[1:4]
+#         self.estimated_q[6] = sensors.imu_data.attitude[0]
+#         self.estimated_q[7:] = q
+#         self.estimated_qv[6:] = qv
+#         err = 1
+#         grad = 1
+#         J = np.zeros((self.num_contacts*3, 6))
+#         err = np.zeros(self.num_contacts*3)
+#         step = np.zeros(self.robot.pin_robot.nv)
+#         while grad > 1e-6:
+#             self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
+#             i = 0
+#             for index, pos in self.contacts.items():
+#                 err[i*3: (i+1)*3] = pos - \
+#                     self.robot.pin_robot.data.oMf[index].translation
+#                 J[i*3: (i+1)*3, :] = pin.getFrameJacobian(self.robot.pin_robot.model,
+#                                                           self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :6]
+#                 i = i+1
+#             if (np.linalg.norm(err) < 0.5e-4):
+#                 break
+#             step[0:6] = np.dot(np.linalg.pinv(J), err)
+#             grad = np.linalg.norm(step[0:6])
+#             self.estimated_q = pin.integrate(
+#                 self.robot.pin_robot.model, self.estimated_q, 0.75*step)
 
-        orientation = pin.Quaternion(self.estimated_q[3:7])
-        self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
-        J = np.zeros((self.num_contacts*3+3, self.robot.pin_robot.nv))
-        alpha = 5
-        J[:3, 3:6] = alpha*orientation.matrix().T
-        i = 0
-        for index, pos in self.contacts.items():
-            J[3+i*3: 3+(i+1)*3, :] = pin.getFrameJacobian(self.robot.pin_robot.model,
-                                                          self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :]
-            i = i+1
-        b = np.zeros(self.num_contacts*3+3)
-        b[0:3] = alpha*sensors.imu_data.angular_velocity[0:3]
-        # self.node.get_logger().info(str(sensors.imu_data.angular_velocity))
-        b[3:] = -np.dot(J[3:, 6:], qv)
-        self.estimated_qv[0:6] = np.dot(np.linalg.pinv(J[:, :6]), b)
+#         orientation = pin.Quaternion(self.estimated_q[3:7])
+#         self.robot.pin_robot.framesForwardKinematics(self.estimated_q)
+#         J = np.zeros((self.num_contacts*3+3, self.robot.pin_robot.nv))
+#         alpha = 5
+#         J[:3, 3:6] = alpha*orientation.matrix().T
+#         i = 0
+#         for index, pos in self.contacts.items():
+#             J[3+i*3: 3+(i+1)*3, :] = pin.getFrameJacobian(self.robot.pin_robot.model,
+#                                                           self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :]
+#             i = i+1
+#         b = np.zeros(self.num_contacts*3+3)
+#         b[0:3] = alpha*sensors.imu_data.angular_velocity[0:3]
+#         # self.node.get_logger().info(str(sensors.imu_data.angular_velocity))
+#         b[3:] = -np.dot(J[3:, 6:], qv)
+#         self.estimated_qv[0:6] = np.dot(np.linalg.pinv(J[:, :6]), b)
 
 
 class TaskMoveWholeBody(TaskBase):
@@ -113,7 +125,7 @@ class TaskMoveWholeBody(TaskBase):
         self.transition_maker()
         
         self.node = Node("node")
-        self.estimator = Estimator(self.robot)
+        self.estimator = None#Estimator(self.robot)
         self.publisher = self.node.create_publisher(MarkerArray, "markers", 1)
         self.base_index = self.robot.pin_robot.model.getFrameId("base_link")
         self.initialized = False
@@ -257,8 +269,7 @@ class TaskMoveWholeBody(TaskBase):
             J[i*3: (i+1)*3, :] = pin.getFrameJacobian(self.robot.pin_robot.model,
                                                       self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :]
             i = i+1
-        Hessian = 1e-3*np.eye((dim))
-        Hessian[:6, :6] = np.eye(6)
+
         g = np.zeros(dim)
         g[:3] = -ades
         g[3:6] = -alphades
@@ -277,10 +288,13 @@ class TaskMoveWholeBody(TaskBase):
                 C[i*4:i*4+4, start+i*3:start+i*3+3] = cone.primal.face
             d = 0.5*np.ones(4*self.num_faces)
             u = 1e20*np.ones(4*self.num_faces)
+            Hessian = 1e-3*np.eye((dim))
+            Hessian[:6, :6] = np.eye(6)
+            self.qp.settings.initial_guess = proxsuite.proxqp.InitialGuess.WARM_START_WITH_PREVIOUS_RESULT
             self.qp.init(Hessian, g, A, b, C, d, u)
             self.initialized = True
         else:
-            self.qp.update(H=Hessian, g=g, A=A, b=b)
+            self.qp.update(g=g, A=A, b=b)
 
         self.qp.solve()
         self.control = self.qp.results.x[nv:2*nv-6]
@@ -338,7 +352,7 @@ class TaskMoveWholeBody(TaskBase):
 
             self.distance_from_edge[i] = (edge_vector[0] * x - edge_vector[1] * y) / (np.sqrt(edge_vector[0]**2 + edge_vector[1]**2))
         
-        self.node.get_logger().info(str(self.distance_from_edge))
+        # self.node.get_logger().info(str(self.distance_from_edge))
 
     def is_point_inside_convex_polygon(self):
 
@@ -398,11 +412,18 @@ class TaskMoveWholeBody(TaskBase):
         
 
     def compute_control(self, t, q, qv, sensors):
-        start = time.perf_counter()
-        if (self.step == 0):
-            self.estimator.init(q, qv, sensors)
-        self.estimator.estimate(t, q, qv, sensors)
+        
+        # if (self.step == 0):
+        #     self.estimator.init(q, qv, sensors)
+        # self.estimator.estimate(t, q, qv, sensors)<
+        
+        if not self.estimator:
+            self.estimator = FixedPointsEstimator(
+                    0.001, self.robot.pin_robot.model, self.robot.pin_robot.data, self.robot.end_eff_ids)
+            self.estimator.init(t, q, qv, sensors)
 
+        if self.estimator and self.estimator.initialized():
+            self.estimator.estimate(t, q, qv, sensors)
         full_q = self.estimator.estimated_q
         full_qv = self.estimator.estimated_qv
         self.step = self.step+1
@@ -450,6 +471,6 @@ class TaskMoveWholeBody(TaskBase):
         rclpy.spin_once(self.node, timeout_sec=0)
 
         elapsed = time.perf_counter() - self.time
-        # self.node.get_logger().info(str(elapsed))
+        self.node.get_logger().info(str(elapsed))
         self.tick(t, q, qv)
         return self.control
