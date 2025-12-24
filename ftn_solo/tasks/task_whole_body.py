@@ -17,7 +17,7 @@ import rclpy
 from sensor_msgs.msg import Joy
 from scipy.linalg import expm
 import math
-
+import time
 
 class Estimator:
     def __init__(self, robot) -> None:
@@ -82,9 +82,10 @@ class Estimator:
                                                           self.robot.pin_robot.data, index, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :]
             i = i+1
         b = np.zeros(self.num_contacts*3+3)
-        b[0:3] = alpha*sensors.imu_data.angular_velocity[0]
+        b[0:3] = alpha*sensors.imu_data.angular_velocity[0:3]
+        # self.node.get_logger().info(str(sensors.imu_data.angular_velocity))
         b[3:] = -np.dot(J[3:, 6:], qv)
-        self.estimated_qv[0:6] = np.dot(    np.linalg.pinv(J[:, :6]), b)
+        self.estimated_qv[0:6] = np.dot(np.linalg.pinv(J[:, :6]), b)
 
 
 class TaskMoveWholeBody(TaskBase):
@@ -128,6 +129,7 @@ class TaskMoveWholeBody(TaskBase):
         self.scale_left_stick_up_down = 1.0
         self.scale_left_stick_left_right = 1.0
         self.scale_right_stick = 1.0
+        self.time = 0
 
     def joy_callback(self, msg):
         self.msg = msg
@@ -142,7 +144,7 @@ class TaskMoveWholeBody(TaskBase):
         else:
             self.des_angular_velocity[0] = 0
         if msg.axes[4] > 0.05 or msg.axes[4] < -0.05:
-            self.des_angular_velocity[1] = -msg.axes[4] * 0.3 * (1 - self.scale_right_stick)
+            self.des_angular_velocity[1] = -msg.axes[4] * 0.3 * self.scale_right_stick#(1 - self.scale_right_stick)
         else:   
             self.des_angular_velocity[1] = 0
         if msg.buttons[6]:
@@ -151,9 +153,9 @@ class TaskMoveWholeBody(TaskBase):
             self.des_angular_velocity[2] = -msg.buttons[7] * 0.2
         else: self.des_angular_velocity[2] = 0
         if msg.buttons[4]:
-            self.des_linear_velocity[2] = -0.2 * (1 - self.scale_up_down_buttons)#-0.5 * ((1 - 0.15 / self.robot.pin_robot.data.oMf[self.base_index].translation[-1]))
+            self.des_linear_velocity[2] = -0.2 * (1 - self.scale)#-0.5 * ((1 - 0.15 / self.robot.pin_robot.data.oMf[self.base_index].translation[-1]))
         elif msg.buttons[5]:
-            self.des_linear_velocity[2] = 0.2 * self.scale_up_down_buttons
+            self.des_linear_velocity[2] = 0.2 * self.scale
         else: self.des_linear_velocity[2] = 0
     
     def transition_maker(self):
@@ -200,6 +202,7 @@ class TaskMoveWholeBody(TaskBase):
         return t >= self.transition_end
 
     def moving_base(self, t, q, qv):
+        self.time = time.perf_counter()
         Kp = 100
         Kd = 20
         dt = t - self.previous_t
@@ -212,20 +215,25 @@ class TaskMoveWholeBody(TaskBase):
 
         self.scale = (knee_angles[2] - angle_upper_limit) / (angle_lower_limit - angle_upper_limit)
         if self.des_linear_velocity[0] > 0:
-            self.scale_left_stick_up_down = (self.distance_from_edge[0] - 0.05) / (0.2 - 0.05)
+            self.scale_left_stick_up_down = (self.distance_from_edge[0] - 0.05) / (0.3 - 0.05)
         elif self.des_linear_velocity[0] < 0:
-            self.scale_left_stick_up_down = (self.distance_from_edge[2] - 0.05) / (0.2 - 0.05)
+            self.scale_left_stick_up_down = (self.distance_from_edge[2] - 0.05) / (0.3 - 0.05)
         
         if self.des_linear_velocity[1] > 0:
-            self.scale_left_stick_left_right = (self.distance_from_edge[1] - 0.05) / (0.2 - 0.05)
+            self.scale_left_stick_left_right = (self.distance_from_edge[1] - 0.05) / (0.3 - 0.05)
         elif self.des_linear_velocity[1] < 0:
-            self.scale_left_stick_left_right = (self.distance_from_edge[3] - 0.05) / (0.2 - 0.05)
+            self.scale_left_stick_left_right = (self.distance_from_edge[3] - 0.05) / (0.3 - 0.05)
 
-        # self.node.get_logger().info(str(self.distance_from_edge))
+        # if self.des_linear_velocity[2] > 0:
+        #     self.scale_up_down_buttons = 1 - 0.15 / self.robot.pin_robot.data.oMf[self.base_index].translation[-1]
+        # elif self.des_linear_velocity[2] < 0:
+        #     self.scale_up_down_buttons = 1 - 0.15 / self.robot.pin_robot.data.oMf[self.base_index].translation[-1]
+
+        self.node.get_logger().info(str(self.distance_from_edge))
         self.des_qv[0:3] = self.des_linear_velocity
         self.des_qv[3:6] = self.des_angular_velocity
         self.des_q = pin.integrate(self.robot.pin_robot.model, self.des_q, self.des_qv * dt)
-
+        # self.node.get_logger().info(str(self.des_linear_velocity))
         des_position = self.des_q[0:3]
         current_position = self.estimator.estimated_q[:3]
         des_orientation = pin.Quaternion(self.des_q[3:7]).matrix()
@@ -277,6 +285,7 @@ class TaskMoveWholeBody(TaskBase):
         self.qp.solve()
         self.control = self.qp.results.x[nv:2*nv-6]
         self.previous_t = t
+
         return True
 
     def get_knee_angles(self):
@@ -389,6 +398,7 @@ class TaskMoveWholeBody(TaskBase):
         
 
     def compute_control(self, t, q, qv, sensors):
+        start = time.perf_counter()
         if (self.step == 0):
             self.estimator.init(q, qv, sensors)
         self.estimator.estimate(t, q, qv, sensors)
@@ -439,6 +449,7 @@ class TaskMoveWholeBody(TaskBase):
 
         rclpy.spin_once(self.node, timeout_sec=0)
 
-
+        elapsed = time.perf_counter() - self.time
+        # self.node.get_logger().info(str(elapsed))
         self.tick(t, q, qv)
         return self.control
